@@ -1,0 +1,25 @@
+node_modules
+.env
+coverage
+coverage.json
+typechain
+typechain-types
+
+# Hardhat files
+cache
+artifacts
+
+# IDE
+.vscode
+.idea
+
+# macOS
+.DS_Store
+
+# npm
+package-lock.json
+yarn.lock
+
+# Hardhat
+cache/
+artifacts/
