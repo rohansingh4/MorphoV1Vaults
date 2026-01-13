@@ -22,10 +22,8 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     // Aerodrome contract addresses
-    address public constant AERODROME_ROUTER =
-        0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
-    address public constant AERODROME_FACTORY =
-        0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
+    address public constant AERODROME_ROUTER =0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
+    address public constant AERODROME_FACTORY =0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
 
     // Bundler addresses
     address public constant ADAPTER_ADDRESS = 0xb98c948CFA24072e58935BC004a8A7b376AE746A;
@@ -42,7 +40,8 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     address public admin;
 
     // Multi-asset support: each asset has its own vault and tracking
-    mapping(address => address) public assetToVault; // asset => current best vault for that asset
+    mapping(address => address) public assetToVault; // asset => current active vault for that asset
+    mapping(address => address[]) public assetAvailableVaults; // asset => array of all allowed vaults for that asset
     mapping(address => uint256) public assetTotalDeposited; // asset => total deposited amount
     mapping(address => bool) public assetHasInitialDeposit; // asset => initial deposit status
     mapping(address => uint256) public assetLastDepositTime; // asset => last deposit timestamp
@@ -61,7 +60,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     uint256 public constant SLIPPAGE_TOLERANCE = 500; // 5% in basis points
 
     address public revenueAddress;
-    uint256 public feePercentage; // Fee percentage in basis points (e.g., 100 = 1%)
+    uint256 public feePercentage=0; // Fee percentage in basis points (e.g., 100 = 1%)
     uint256 public rebalanceFeePercentage; // Rebalance fee percentage in basis points (e.g., 1000 = 10%)
     uint256 public merklClaimFeePercentage; // Merkl claim fee percentage in basis points (e.g., 1000 = 10%)
     uint256 public minProfitForFee = 10e6; // $10 in USDC (6 decimals)
@@ -123,12 +122,13 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     event MerklTokensClaimed(address indexed token, uint256 totalAmount, uint256 feeAmount, uint256 userAmount);
 
     /**
-     * @dev Constructor for multi-asset vault
+     * @dev Constructor for multi-asset vault with multi-vault support per asset
      * @param _owner The owner of the vault (user)
      * @param _admin The admin who manages the vault
-     * @param _assets Array of initial assets to support
-     * @param _assetVaults Array of initial vaults for each asset (must match _assets length)
-     * @param _initialAllowedVaults Array of all vaults that are whitelisted
+     * @param _assets Array of initial assets to support (e.g., [USDC, WETH, WBTC])
+     * @param _assetVaults 2D array of vaults for each asset. Each asset can have multiple vaults.
+     *        Example: [[USDC_Vault1, USDC_Vault2], [WETH_Vault1, WETH_Vault2, WETH_Vault3]]
+     *        The first vault in each sub-array becomes the active/primary vault for that asset
      * @param _revenueAddress Address to receive fees
      * @param _feePercentage Fee percentage in basis points for withdrawal fees
      * @param _rebalanceFeePercentage Fee percentage in basis points for rebalance fees (e.g., 1000 = 10%)
@@ -138,8 +138,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         address _owner,
         address _admin,
         address[] memory _assets,
-        address[] memory _assetVaults,
-        address[] memory _initialAllowedVaults,
+        address[][] memory _assetVaults,
         address _revenueAddress,
         uint256 _feePercentage,
         uint256 _rebalanceFeePercentage,
@@ -158,23 +157,39 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         rebalanceFeePercentage = _rebalanceFeePercentage;
         merklClaimFeePercentage = _merklClaimFeePercentage;
 
-        // Add initial assets and their vaults
+        // Add initial assets and their vaults (multi-vault support)
         for (uint256 i = 0; i < _assets.length; i++) {
             require(_assets[i] != address(0), "Invalid asset address");
-            require(_assetVaults[i] != address(0), "Invalid vault address");
             require(!isAllowedAsset[_assets[i]], "Duplicate asset");
+            require(_assetVaults[i].length > 0, "Each asset must have at least one vault");
 
+            // Mark asset as allowed
             isAllowedAsset[_assets[i]] = true;
             allowedAssets.push(_assets[i]);
-            assetToVault[_assets[i]] = _assetVaults[i];
-        }
 
-        // Add initial vaults to whitelist
-        for (uint256 i = 0; i < _initialAllowedVaults.length; i++) {
-            require(_initialAllowedVaults[i] != address(0), "Invalid vault address");
-            if (!isAllowedVault[_initialAllowedVaults[i]]) {
-                isAllowedVault[_initialAllowedVaults[i]] = true;
-                allowedVaults.push(_initialAllowedVaults[i]);
+            // Set the first vault as the active/primary vault for this asset
+            assetToVault[_assets[i]] = _assetVaults[i][0];
+
+            // Store all vaults for this asset and validate them
+            for (uint256 j = 0; j < _assetVaults[i].length; j++) {
+                address vault = _assetVaults[i][j];
+                require(vault != address(0), "Invalid vault address");
+
+                // Verify vault accepts this asset
+                require(IMetaMorpho(vault).asset() == _assets[i], "Vault asset mismatch");
+
+                // Check for duplicate vaults for this asset
+                for (uint256 k = 0; k < j; k++) {
+                    require(_assetVaults[i][k] != vault, "Duplicate vault for asset");
+                }
+
+                assetAvailableVaults[_assets[i]].push(vault);
+
+                // Add vault to allowed vaults whitelist if not already added
+                if (!isAllowedVault[vault]) {
+                    isAllowedVault[vault] = true;
+                    allowedVaults.push(vault);
+                }
             }
         }
     }
@@ -553,7 +568,8 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     }
 
     /**
-     * @dev Update the vault for a specific asset
+     * @dev Update the active vault for a specific asset (must be from available vaults)
+     * @notice This function is deprecated, use setAssetActiveVault instead
      */
     function updateAssetVault(address asset, address newVault)
         external
@@ -563,6 +579,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     {
         require(newVault != address(0), "Invalid vault");
         require(IMetaMorpho(newVault).asset() == asset, "Vault asset mismatch");
+        require(isVaultAvailableForAsset(asset, newVault), "Vault not available for this asset");
 
         address oldVault = assetToVault[asset];
         require(oldVault != newVault, "Same vault");
@@ -570,19 +587,6 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         assetToVault[asset] = newVault;
 
         emit AssetVaultUpdated(asset, oldVault, newVault);
-    }
-
-    /**
-     * @dev Add a new vault to the whitelist
-     */
-    function addVault(address vault) external onlyAdmin {
-        require(vault != address(0), "Invalid vault address");
-        require(!isAllowedVault[vault], "Vault already allowed");
-
-        isAllowedVault[vault] = true;
-        allowedVaults.push(vault);
-
-        emit VaultAdded(vault);
     }
 
     /**
@@ -689,9 +693,10 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     /**
      * @dev Initial deposit for a specific asset
      * @param asset The asset to deposit
+     * @param vault The vault to deposit into (must be in assetAvailableVaults for this asset)
      * @param amount Amount to deposit
      */
-    function initialDeposit(address asset, uint256 amount)
+    function initialDeposit(address asset, address vault, uint256 amount)
         external
         onlyOwner
         onlyAllowedAsset(asset)
@@ -700,9 +705,8 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     {
         require(!assetHasInitialDeposit[asset], "Initial deposit already made for this asset");
         require(amount > 0, "Amount must be positive");
-
-        address vault = assetToVault[asset];
-        require(vault != address(0), "No vault set for asset");
+        require(vault != address(0), "Invalid vault address");
+        require(isVaultAvailableForAsset(asset, vault), "Vault not available for this asset");
 
         // Approve admin as Merkl operator on first deposit (any asset)
         _approveMerklOperator();
@@ -712,6 +716,9 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
 
         // Deposit to vault using bundler
         _depositToVaultViaBundler(vault, amount, asset);
+
+        // Set the chosen vault as the active vault for this asset
+        assetToVault[asset] = vault;
 
         // Set state for this asset
         assetTotalDeposited[asset] = amount;
@@ -879,9 +886,9 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     // ============ Rebalance Functions ============
 
     /**
-     * @dev Rebalance a specific asset to a new vault
+     * @dev Rebalance a specific asset to a new vault (must be in available vaults for that asset)
      * @param asset The asset to rebalance
-     * @param toVault The new vault to deposit into
+     * @param toVault The new vault to deposit into (must be in assetAvailableVaults)
      */
     function rebalanceToVault(address asset, address toVault)
         external
@@ -892,6 +899,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         whenNotPaused
     {
         require(assetHasInitialDeposit[asset], "No deposits for this asset");
+        require(isVaultAvailableForAsset(asset, toVault), "Vault not available for this asset");
 
         address fromVault = assetToVault[asset];
         require(fromVault != toVault, "Same vault");
@@ -1202,6 +1210,105 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
      */
     function getAssetFeesCollected(address asset) external view returns (uint256) {
         return assetTotalFeesCollected[asset];
+    }
+
+    /**
+     * @dev Get all available vaults for a specific asset
+     */
+    function getAssetAvailableVaults(address asset) external view returns (address[] memory) {
+        return assetAvailableVaults[asset];
+    }
+
+    /**
+     * @dev Get the active/primary vault for a specific asset
+     */
+    function getAssetActiveVault(address asset) external view returns (address) {
+        return assetToVault[asset];
+    }
+
+    /**
+     * @dev Check if a vault is available for a specific asset
+     */
+    function isVaultAvailableForAsset(address asset, address vault) public view returns (bool) {
+        address[] memory vaults = assetAvailableVaults[asset];
+        for (uint256 i = 0; i < vaults.length; i++) {
+            if (vaults[i] == vault) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @dev Add a new vault to an asset's available vaults list
+     * @notice Automatically adds vault to global whitelist if not already present
+     * @param asset The asset address
+     * @param vault The vault address to add
+     */
+    function addVaultToAsset(address asset, address vault)
+        external
+        onlyAdmin
+        onlyAllowedAsset(asset)
+    {
+        require(vault != address(0), "Invalid vault address");
+        require(IMetaMorpho(vault).asset() == asset, "Vault asset mismatch");
+        require(!isVaultAvailableForAsset(asset, vault), "Vault already available for asset");
+
+        // Automatically add to global whitelist if not already present
+        if (!isAllowedVault[vault]) {
+            isAllowedVault[vault] = true;
+            allowedVaults.push(vault);
+        }
+
+        // Add to asset's available vaults
+        assetAvailableVaults[asset].push(vault);
+
+        emit VaultAdded(vault);
+    }
+
+    /**
+     * @dev Remove a vault from an asset's available vaults list
+     * @param asset The asset address
+     * @param vault The vault address to remove
+     */
+    function removeVaultFromAsset(address asset, address vault)
+        external
+        onlyAdmin
+        onlyAllowedAsset(asset)
+    {
+        require(vault != assetToVault[asset], "Cannot remove active vault");
+        require(isVaultAvailableForAsset(asset, vault), "Vault not available for asset");
+
+        address[] storage vaults = assetAvailableVaults[asset];
+        for (uint256 i = 0; i < vaults.length; i++) {
+            if (vaults[i] == vault) {
+                vaults[i] = vaults[vaults.length - 1];
+                vaults.pop();
+                break;
+            }
+        }
+
+        emit VaultRemoved(vault);
+    }
+
+    /**
+     * @dev Set the active/primary vault for an asset from its available vaults
+     * @param asset The asset address
+     * @param newActiveVault The new active vault (must be in available vaults)
+     */
+    function setAssetActiveVault(address asset, address newActiveVault)
+        external
+        onlyAdmin
+        onlyAllowedAsset(asset)
+    {
+        require(newActiveVault != address(0), "Invalid vault");
+        require(isVaultAvailableForAsset(asset, newActiveVault), "Vault not available for this asset");
+        require(assetToVault[asset] != newActiveVault, "Already active vault");
+
+        address oldVault = assetToVault[asset];
+        assetToVault[asset] = newActiveVault;
+
+        emit AssetVaultUpdated(asset, oldVault, newActiveVault);
     }
 
     // ============ Merkl Functions ============
