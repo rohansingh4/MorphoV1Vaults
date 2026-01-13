@@ -7,7 +7,6 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
-import "./Interfaces/IAerodrome.sol";
 import "./Interfaces/IMetaMorpho.sol";
 import "./Interfaces/IBundler.sol";
 import "./Interfaces/IERC20Extended.sol";
@@ -21,10 +20,6 @@ import "./Interfaces/IMerklDistributor.sol";
 contract UserVault_V4 is ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
-    // Aerodrome contract addresses
-    address public constant AERODROME_ROUTER =0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43;
-    address public constant AERODROME_FACTORY =0x420DD381b31aEf6683db6B902084cB0FFECe40Da;
-
     // Bundler addresses
     address public constant ADAPTER_ADDRESS = 0xb98c948CFA24072e58935BC004a8A7b376AE746A;
     address public constant BUNDLER_ADDRESS = 0x6BFd8137e702540E7A42B74178A4a49Ba43920C4;
@@ -36,7 +31,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     IMerklDistributor public constant merklDistributor = IMerklDistributor(MERKL_DISTRIBUTOR);
 
     // State variables
-    address public immutable owner;
+    address public owner;
     address public admin;
 
     // Multi-asset support: each asset has its own vault and tracking
@@ -51,19 +46,25 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     mapping(address => uint256) public assetRebalanceBaseAmount; // asset => base amount for profit calculation
     mapping(address => uint256) public assetTotalRebalanceFees; // asset => total rebalance fees collected
 
-    // Allowed assets and vaults
+    // Allowed assets and vaults with index tracking for O(1) removal
     mapping(address => bool) public isAllowedAsset;
     mapping(address => bool) public isAllowedVault;
+    mapping(address => uint256) private assetIndex; // asset => index in allowedAssets array
+    mapping(address => uint256) private vaultIndex; // vault => index in allowedVaults array
     address[] public allowedAssets;
     address[] public allowedVaults;
 
-    uint256 public constant SLIPPAGE_TOLERANCE = 500; // 5% in basis points
+    // Fee configuration
+    uint256 public constant MAX_FEE_PERCENTAGE = 3000; // Maximum 30% fee in basis points
+    uint256 public constant DEFAULT_FEE_PERCENTAGE = 1000; // Default 10% fee in basis points
+
+    // Ownership transfer
+    address public pendingOwner;
 
     address public revenueAddress;
-    uint256 public feePercentage=0; // Fee percentage in basis points (e.g., 100 = 1%)
-    uint256 public rebalanceFeePercentage; // Rebalance fee percentage in basis points (e.g., 1000 = 10%)
-    uint256 public merklClaimFeePercentage; // Merkl claim fee percentage in basis points (e.g., 1000 = 10%)
-    uint256 public minProfitForFee = 10e6; // $10 in USDC (6 decimals)
+    uint256 public feePercentage = DEFAULT_FEE_PERCENTAGE; // Fee percentage in basis points (default 10%)
+    uint256 public rebalanceFeePercentage = DEFAULT_FEE_PERCENTAGE; // Rebalance fee percentage in basis points (default 10%)
+    uint256 public merklClaimFeePercentage = DEFAULT_FEE_PERCENTAGE; // Merkl claim fee percentage in basis points (default 10%)
 
     // Merkl operator approval status
     bool public adminApprovedForMerkl;
@@ -95,13 +96,6 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         uint256 feeAmount,
         uint256 newBaseAmount
     );
-    event AssetSwapped(
-        address indexed fromAsset,
-        address indexed toAsset,
-        uint256 amountIn,
-        uint256 amountOut
-    );
-
     event RevenueAddressUpdated(
         address indexed oldAddress,
         address indexed newAddress
@@ -115,11 +109,13 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         uint256 feeAmount,
         uint256 userAmount
     );
-    event MinProfitForFeeUpdated(uint256 oldThreshold, uint256 newThreshold);
 
     // Merkl events
     event MerklOperatorApproved(address indexed admin);
     event MerklTokensClaimed(address indexed token, uint256 totalAmount, uint256 feeAmount, uint256 userAmount);
+    event MerklOperatorReapproved(address indexed admin);
+    event OwnershipTransferInitiated(address indexed currentOwner, address indexed pendingOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     /**
      * @dev Constructor for multi-asset vault with multi-vault support per asset
@@ -130,19 +126,13 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
      *        Example: [[USDC_Vault1, USDC_Vault2], [WETH_Vault1, WETH_Vault2, WETH_Vault3]]
      *        The first vault in each sub-array becomes the active/primary vault for that asset
      * @param _revenueAddress Address to receive fees
-     * @param _feePercentage Fee percentage in basis points for withdrawal fees
-     * @param _rebalanceFeePercentage Fee percentage in basis points for rebalance fees (e.g., 1000 = 10%)
-     * @param _merklClaimFeePercentage Fee percentage in basis points for Merkl claim fees (e.g., 1000 = 10%)
      */
     constructor(
         address _owner,
         address _admin,
         address[] memory _assets,
         address[][] memory _assetVaults,
-        address _revenueAddress,
-        uint256 _feePercentage,
-        uint256 _rebalanceFeePercentage,
-        uint256 _merklClaimFeePercentage
+        address _revenueAddress
     ) {
         require(_owner != address(0), "Invalid owner");
         require(_admin != address(0), "Invalid admin");
@@ -153,9 +143,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         owner = _owner;
         admin = _admin;
         revenueAddress = _revenueAddress;
-        feePercentage = _feePercentage;
-        rebalanceFeePercentage = _rebalanceFeePercentage;
-        merklClaimFeePercentage = _merklClaimFeePercentage;
+        // Fee percentages use DEFAULT_FEE_PERCENTAGE (10%) as default values
 
         // Add initial assets and their vaults (multi-vault support)
         for (uint256 i = 0; i < _assets.length; i++) {
@@ -163,8 +151,9 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
             require(!isAllowedAsset[_assets[i]], "Duplicate asset");
             require(_assetVaults[i].length > 0, "Each asset must have at least one vault");
 
-            // Mark asset as allowed
+            // Mark asset as allowed and track index
             isAllowedAsset[_assets[i]] = true;
+            assetIndex[_assets[i]] = allowedAssets.length;
             allowedAssets.push(_assets[i]);
 
             // Set the first vault as the active/primary vault for this asset
@@ -188,6 +177,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
                 // Add vault to allowed vaults whitelist if not already added
                 if (!isAllowedVault[vault]) {
                     isAllowedVault[vault] = true;
+                    vaultIndex[vault] = allowedVaults.length;
                     allowedVaults.push(vault);
                 }
             }
@@ -201,14 +191,6 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
 
     modifier onlyAdmin() {
         require(msg.sender == admin, "Only admin");
-        _;
-    }
-
-    modifier onlyOwnerOrAdmin() {
-        require(
-            msg.sender == owner || msg.sender == admin,
-            "Only owner or admin"
-        );
         _;
     }
 
@@ -244,8 +226,14 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         uint256 amount,
         address vaultAsset
     ) internal {
-        // Approve the adapter to spend tokens
-        IERC20(vaultAsset).approve(ADAPTER_ADDRESS, amount);
+        // Approve the adapter to spend tokens (using forceApprove for USDT compatibility)
+        IERC20(vaultAsset).forceApprove(ADAPTER_ADDRESS, amount);
+
+        // Calculate max share price with slippage protection (10% tolerance)
+        // Get current share price: assets per share = convertToAssets(1e18) for 18 decimal shares
+        uint256 currentSharePrice = IMetaMorpho(vault).convertToAssets(1e18);
+        // maxSharePriceE27 = price * 1e27 / 1e18 = price * 1e9, with 10% slippage tolerance
+        uint256 maxSharePriceE27 = (currentSharePrice * 1e9 * 11000) / 10000;
 
         // Create calls array
         Call[] memory calls = new Call[](2);
@@ -264,14 +252,14 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
             callbackHash: bytes32(0)
         });
 
-        // Second call: erc4626Deposit - deposit into vault
+        // Second call: erc4626Deposit - deposit into vault with slippage protection
         calls[1] = Call({
             to: ADAPTER_ADDRESS,
             data: abi.encodeWithSelector(
                 bytes4(0x6ef5eeae), // erc4626Deposit selector
                 vault,               // vault address
                 amount,              // assets
-                type(uint256).max,   // maxSharePriceE27
+                maxSharePriceE27,    // maxSharePriceE27 with slippage protection
                 address(this)       // receiver (this contract receives the shares)
             ),
             value: 0,
@@ -296,8 +284,14 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         // Get the amount of assets we expect to receive
         uint256 expectedAssets = IMetaMorpho(vault).previewRedeem(shares);
 
-        // Approve the adapter to spend the shares
-        IMetaMorpho(vault).approve(ADAPTER_ADDRESS, shares);
+        // Approve the adapter to spend the shares (using forceApprove for compatibility)
+        IERC20(vault).forceApprove(ADAPTER_ADDRESS, shares);
+
+        // Calculate min share price with slippage protection (10% tolerance)
+        // Get current share price: assets per share = convertToAssets(1e18) for 18 decimal shares
+        uint256 currentSharePrice = IMetaMorpho(vault).convertToAssets(1e18);
+        // minSharePriceE27 = price * 1e27 / 1e18 = price * 1e9, with 10% slippage tolerance
+        uint256 minSharePriceE27 = (currentSharePrice * 1e9 * 9000) / 10000;
 
         // Create calls array
         Call[] memory calls = new Call[](2);
@@ -316,14 +310,14 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
             callbackHash: bytes32(0)
         });
 
-        // Second call: erc4626Redeem - redeem from vault
+        // Second call: erc4626Redeem - redeem from vault with slippage protection
         calls[1] = Call({
             to: ADAPTER_ADDRESS,
             data: abi.encodeWithSelector(
                 bytes4(0xa7f6e606), // erc4626Redeem selector
                 vault,               // vault address
                 shares,              // shares to redeem
-                0,                   // minSharePriceE27 (using 0 for no minimum)
+                minSharePriceE27,    // minSharePriceE27 with slippage protection
                 address(this),       // receiver of assets (this contract)
                 ADAPTER_ADDRESS      // owner of shares (adapter has them now)
             ),
@@ -337,190 +331,6 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
 
         // Return the expected assets
         return expectedAssets;
-    }
-
-    /**
-     * @dev Internal function to swap tokens using Aerodrome with optimal pool selection
-     */
-    function _swapTokens(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn
-    ) internal returns (uint256 amountOut) {
-        require(tokenIn != tokenOut, "Same token");
-        require(amountIn > 0, "Zero amount");
-
-        // Check both stable and volatile pools
-        address stablePool = IAerodromeFactory(AERODROME_FACTORY).getPool(
-            tokenIn,
-            tokenOut,
-            true
-        );
-        address volatilePool = IAerodromeFactory(AERODROME_FACTORY).getPool(
-            tokenIn,
-            tokenOut,
-            false
-        );
-
-        require(
-            stablePool != address(0) || volatilePool != address(0),
-            "No pools exist"
-        );
-
-        // Determine which pool to use based on expected output
-        bool useStablePool = _shouldUseStablePool(
-            tokenIn,
-            tokenOut,
-            amountIn,
-            stablePool,
-            volatilePool
-        );
-
-        // Approve router to spend tokens
-        IERC20(tokenIn).approve(AERODROME_ROUTER, amountIn);
-
-        // Prepare route with selected pool type
-        Route[] memory routes = new Route[](1);
-        routes[0] = Route({
-            from: tokenIn,
-            to: tokenOut,
-            stable: useStablePool,
-            factory: AERODROME_FACTORY
-        });
-
-        // Get expected output amount
-        uint256[] memory expectedAmounts = IAerodromeRouter(AERODROME_ROUTER)
-            .getAmountsOut(amountIn, routes);
-        uint256 minAmountOut = (expectedAmounts[1] *
-            (10000 - SLIPPAGE_TOLERANCE)) / 10000;
-
-        // Execute swap
-        uint256[] memory amounts = IAerodromeRouter(AERODROME_ROUTER)
-            .swapExactTokensForTokens(
-                amountIn,
-                minAmountOut,
-                routes,
-                address(this),
-                block.timestamp + 300
-            );
-
-        amountOut = amounts[1];
-
-        emit AssetSwapped(tokenIn, tokenOut, amountIn, amountOut);
-    }
-
-    /**
-     * @dev Determines which pool (stable or volatile) should be used for the swap
-     */
-    function _shouldUseStablePool(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        address stablePool,
-        address volatilePool
-    ) internal view returns (bool useStablePool) {
-        // If only one pool exists, use it
-        if (stablePool == address(0) && volatilePool != address(0)) {
-            return false; // Use volatile pool
-        }
-        if (volatilePool == address(0) && stablePool != address(0)) {
-            return true; // Use stable pool
-        }
-
-        // If both pools exist, compare expected outputs
-        uint256 stableOutput = 0;
-        uint256 volatileOutput = 0;
-
-        // Get expected output from stable pool
-        if (stablePool != address(0)) {
-            stableOutput = _getPoolOutput(tokenIn, tokenOut, amountIn, true);
-        }
-
-        // Get expected output from volatile pool
-        if (volatilePool != address(0)) {
-            volatileOutput = _getPoolOutput(tokenIn, tokenOut, amountIn, false);
-        }
-
-        // Use the pool that gives better output
-        // Add a small bias towards stable pools (e.g., 0.1%) for similar outputs
-        uint256 stableBias = (stableOutput * 1001) / 1000; // 0.1% bias
-
-        return stableBias >= volatileOutput;
-    }
-
-    /**
-     * @dev Get expected output from a specific pool type
-     */
-    function _getPoolOutput(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        bool stable
-    ) internal view returns (uint256 expectedOutput) {
-        // Check if pool exists
-        address pool = IAerodromeFactory(AERODROME_FACTORY).getPool(
-            tokenIn,
-            tokenOut,
-            stable
-        );
-        if (pool == address(0)) {
-            return 0;
-        }
-
-        // Prepare route
-        Route[] memory routes = new Route[](1);
-        routes[0] = Route({
-            from: tokenIn,
-            to: tokenOut,
-            stable: stable,
-            factory: AERODROME_FACTORY
-        });
-
-        // Try to get amounts out
-        try
-            IAerodromeRouter(AERODROME_ROUTER).getAmountsOut(amountIn, routes)
-        returns (uint256[] memory amounts) {
-            return amounts[1];
-        } catch {
-            return 0; // Return 0 if call fails (e.g., insufficient liquidity)
-        }
-    }
-
-    /**
-     * @dev Updated view function to get estimated swap output with optimal pool selection
-     */
-    function _getEstimatedSwapOutput(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn
-    ) internal view returns (uint256) {
-        if (tokenIn == tokenOut || amountIn == 0) return amountIn;
-
-        // Check both pool types
-        address stablePool = IAerodromeFactory(AERODROME_FACTORY).getPool(
-            tokenIn,
-            tokenOut,
-            true
-        );
-        address volatilePool = IAerodromeFactory(AERODROME_FACTORY).getPool(
-            tokenIn,
-            tokenOut,
-            false
-        );
-
-        if (stablePool == address(0) && volatilePool == address(0)) return 0;
-
-        // Determine which pool to use
-        bool useStablePool = _shouldUseStablePool(
-            tokenIn,
-            tokenOut,
-            amountIn,
-            stablePool,
-            volatilePool
-        );
-
-        // Get output from selected pool
-        return _getPoolOutput(tokenIn, tokenOut, amountIn, useStablePool);
     }
 
     // ============ Admin Functions ============
@@ -538,6 +348,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         require(IMetaMorpho(vault).asset() == asset, "Vault asset mismatch");
 
         isAllowedAsset[asset] = true;
+        assetIndex[asset] = allowedAssets.length;
         allowedAssets.push(asset);
         assetToVault[asset] = vault;
 
@@ -546,6 +357,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
 
     /**
      * @dev Remove an asset (only if no deposits exist)
+     * @notice Uses O(1) removal via index mapping
      */
     function removeAsset(address asset) external onlyAdmin {
         require(isAllowedAsset[asset], "Asset not allowed");
@@ -553,14 +365,16 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
 
         isAllowedAsset[asset] = false;
 
-        // Remove from array
-        for (uint256 i = 0; i < allowedAssets.length; i++) {
-            if (allowedAssets[i] == asset) {
-                allowedAssets[i] = allowedAssets[allowedAssets.length - 1];
-                allowedAssets.pop();
-                break;
-            }
+        // O(1) removal using index mapping
+        uint256 idx = assetIndex[asset];
+        uint256 lastIdx = allowedAssets.length - 1;
+        if (idx != lastIdx) {
+            address lastAsset = allowedAssets[lastIdx];
+            allowedAssets[idx] = lastAsset;
+            assetIndex[lastAsset] = idx;
         }
+        allowedAssets.pop();
+        delete assetIndex[asset];
 
         delete assetToVault[asset];
 
@@ -568,29 +382,8 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
     }
 
     /**
-     * @dev Update the active vault for a specific asset (must be from available vaults)
-     * @notice This function is deprecated, use setAssetActiveVault instead
-     */
-    function updateAssetVault(address asset, address newVault)
-        external
-        onlyAdmin
-        onlyAllowedAsset(asset)
-        onlyAllowedVault(newVault)
-    {
-        require(newVault != address(0), "Invalid vault");
-        require(IMetaMorpho(newVault).asset() == asset, "Vault asset mismatch");
-        require(isVaultAvailableForAsset(asset, newVault), "Vault not available for this asset");
-
-        address oldVault = assetToVault[asset];
-        require(oldVault != newVault, "Same vault");
-
-        assetToVault[asset] = newVault;
-
-        emit AssetVaultUpdated(asset, oldVault, newVault);
-    }
-
-    /**
      * @dev Remove a vault from the whitelist
+     * @notice Uses O(1) removal via index mapping
      */
     function removeVault(address vault) external onlyAdmin {
         require(isAllowedVault[vault], "Vault not allowed");
@@ -602,14 +395,16 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
 
         isAllowedVault[vault] = false;
 
-        // Remove from array
-        for (uint256 i = 0; i < allowedVaults.length; i++) {
-            if (allowedVaults[i] == vault) {
-                allowedVaults[i] = allowedVaults[allowedVaults.length - 1];
-                allowedVaults.pop();
-                break;
-            }
+        // O(1) removal using index mapping
+        uint256 idx = vaultIndex[vault];
+        uint256 lastIdx = allowedVaults.length - 1;
+        if (idx != lastIdx) {
+            address lastVault = allowedVaults[lastIdx];
+            allowedVaults[idx] = lastVault;
+            vaultIndex[lastVault] = idx;
         }
+        allowedVaults.pop();
+        delete vaultIndex[vault];
 
         emit VaultRemoved(vault);
     }
@@ -631,6 +426,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
      * @dev Update fee percentage for withdrawal fees
      */
     function updateFeePercentage(uint256 newFeePercentage) external onlyAdmin {
+        require(newFeePercentage <= MAX_FEE_PERCENTAGE, "Fee exceeds maximum");
         uint256 oldFee = feePercentage;
         feePercentage = newFeePercentage;
         emit FeePercentageUpdated(oldFee, newFeePercentage);
@@ -640,6 +436,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
      * @dev Update rebalance fee percentage
      */
     function updateRebalanceFeePercentage(uint256 newRebalanceFeePercentage) external onlyAdmin {
+        require(newRebalanceFeePercentage <= MAX_FEE_PERCENTAGE, "Fee exceeds maximum");
         uint256 oldFee = rebalanceFeePercentage;
         rebalanceFeePercentage = newRebalanceFeePercentage;
         emit RebalanceFeePercentageUpdated(oldFee, newRebalanceFeePercentage);
@@ -649,19 +446,10 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
      * @dev Update Merkl claim fee percentage
      */
     function updateMerklClaimFeePercentage(uint256 newMerklClaimFeePercentage) external onlyAdmin {
+        require(newMerklClaimFeePercentage <= MAX_FEE_PERCENTAGE, "Fee exceeds maximum");
         uint256 oldFee = merklClaimFeePercentage;
         merklClaimFeePercentage = newMerklClaimFeePercentage;
         emit MerklClaimFeePercentageUpdated(oldFee, newMerklClaimFeePercentage);
-    }
-
-    /**
-     * @dev Update minimum profit threshold for fee charging
-     */
-    function updateMinProfitForFee(uint256 newMinProfitForFee) external onlyAdmin {
-        require(newMinProfitForFee > 0, "Invalid minimum profit for fee");
-        uint256 oldThreshold = minProfitForFee;
-        minProfitForFee = newMinProfitForFee;
-        emit MinProfitForFeeUpdated(oldThreshold, newMinProfitForFee);
     }
 
     /**
@@ -672,6 +460,36 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         address oldAdmin = admin;
         admin = newAdmin;
         emit AdminUpdated(oldAdmin, newAdmin);
+    }
+
+    /**
+     * @dev Initiate ownership transfer (two-step process for safety)
+     * @param newOwner The address to transfer ownership to
+     */
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Invalid new owner");
+        require(newOwner != owner, "Already the owner");
+        pendingOwner = newOwner;
+        emit OwnershipTransferInitiated(owner, newOwner);
+    }
+
+    /**
+     * @dev Accept ownership transfer (must be called by pending owner)
+     */
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "Not pending owner");
+        address oldOwner = owner;
+        owner = pendingOwner;
+        pendingOwner = address(0);
+        emit OwnershipTransferred(oldOwner, owner);
+    }
+
+    /**
+     * @dev Cancel pending ownership transfer
+     */
+    function cancelOwnershipTransfer() external onlyOwner {
+        require(pendingOwner != address(0), "No pending transfer");
+        pendingOwner = address(0);
     }
 
     /**
@@ -952,6 +770,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
 
     /**
      * @dev Calculate fee amount from profit for a specific asset
+     * @notice Fee is only charged on profit, not on principal
      * @param asset The asset to calculate fees for
      * @param totalAmount The total amount being withdrawn
      */
@@ -968,37 +787,11 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         // Calculate profit
         uint256 profit = totalAmount - assetTotalDeposited[asset];
 
-        // Only charge a fee if profit exceeds threshold
-        // Convert minProfitForFee to asset decimals if needed
-        uint256 minProfitThreshold = _convertToAssetDecimals(minProfitForFee, asset);
-
-        if (profit <= minProfitThreshold) {
-            return (0, totalAmount);
-        }
-
         // Charge fee only on the profit portion
         feeAmount = (profit * feePercentage) / 10000;
         userAmount = totalAmount - feeAmount;
 
         return (feeAmount, userAmount);
-    }
-
-    /**
-     * @dev Convert a USDC-based amount (6 decimals) to the asset's decimal format
-     */
-    function _convertToAssetDecimals(uint256 usdcAmount, address asset)
-        internal
-        view
-        returns (uint256)
-    {
-        uint256 assetDecimals = _getTokenDecimals(asset);
-        if (assetDecimals == 6) {
-            return usdcAmount;
-        } else if (assetDecimals > 6) {
-            return usdcAmount * (10 ** (assetDecimals - 6));
-        } else {
-            return usdcAmount / (10 ** (6 - assetDecimals));
-        }
     }
 
     // ============ View Functions ============
@@ -1199,10 +992,11 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         returns (
             address _revenueAddress,
             uint256 _feePercentage,
-            uint256 _minProfitForFee
+            uint256 _rebalanceFeePercentage,
+            uint256 _merklClaimFeePercentage
         )
     {
-        return (revenueAddress, feePercentage, minProfitForFee);
+        return (revenueAddress, feePercentage, rebalanceFeePercentage, merklClaimFeePercentage);
     }
 
     /**
@@ -1257,6 +1051,7 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         // Automatically add to global whitelist if not already present
         if (!isAllowedVault[vault]) {
             isAllowedVault[vault] = true;
+            vaultIndex[vault] = allowedVaults.length;
             allowedVaults.push(vault);
         }
 
@@ -1391,11 +1186,15 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         require(tokens.length == proofs.length, "Array length mismatch");
         require(tokens.length > 0, "Empty arrays");
 
-        // Prepare arrays for batch claim
+        // Prepare arrays for batch claim and check for duplicates
         address[] memory accounts = new address[](tokens.length);
         for (uint256 i = 0; i < tokens.length; i++) {
             require(tokens[i] != address(0), "Invalid token address");
             require(claimables[i] > 0, "Nothing to claim");
+            // Check for duplicate tokens
+            for (uint256 j = 0; j < i; j++) {
+                require(tokens[i] != tokens[j], "Duplicate token in batch");
+            }
             accounts[i] = address(this);
         }
 
@@ -1496,11 +1295,15 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
         require(tokens.length == proofs.length, "Array length mismatch");
         require(tokens.length > 0, "Empty arrays");
 
-        // Prepare arrays
+        // Prepare arrays and check for duplicates
         address[] memory accounts = new address[](tokens.length);
         for (uint256 i = 0; i < tokens.length; i++) {
             require(tokens[i] != address(0), "Invalid token address");
             require(claimables[i] > 0, "Nothing to claim");
+            // Check for duplicate tokens
+            for (uint256 j = 0; j < i; j++) {
+                require(tokens[i] != tokens[j], "Duplicate token in batch");
+            }
             accounts[i] = address(this);
         }
 
@@ -1535,6 +1338,24 @@ contract UserVault_V4 is ReentrancyGuard, Pausable {
                 emit MerklTokensClaimed(tokens[i], claimedAmount, feeAmount, userAmount);
             }
         }
+    }
+
+    /**
+     * @dev Re-approve admin as Merkl operator (useful if admin changed or operator status was revoked)
+     * @notice Only callable by owner to ensure security
+     */
+    function reapproveMerklOperator() external onlyOwner {
+        // Check current operator status
+        bool currentlyApproved = merklDistributor.operators(address(this), admin) == 1;
+
+        // Toggle operator status (if currently approved, this will revoke and re-approve)
+        if (currentlyApproved) {
+            merklDistributor.toggleOperator(address(this), admin); // Revoke
+        }
+        merklDistributor.toggleOperator(address(this), admin); // Approve
+
+        adminApprovedForMerkl = true;
+        emit MerklOperatorReapproved(admin);
     }
 
     // ============ Emergency Functions ============
