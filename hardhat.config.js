@@ -15,12 +15,13 @@ module.exports = {
   },
   networks: {
     hardhat: {
-      chainId: 31337,
+      chainId: 31337, // Keep default chainId
       allowUnlimitedContractSize: true, // Allow oversized contracts for testing
-      forking: {
+      forking: process.env.FORKING === "true" ? {
         url: process.env.BASE_RPC_URL || "https://mainnet.base.org",
-        enabled: process.env.FORKING === "true",
-      },
+        blockNumber: process.env.FORK_BLOCK_NUMBER ? parseInt(process.env.FORK_BLOCK_NUMBER) : undefined,
+        enabled: true,
+      } : undefined,
     },
     localhost: {
       url: "http://127.0.0.1:8545",

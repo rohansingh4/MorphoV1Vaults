@@ -11,7 +11,12 @@
     "deploy:localhost": "hardhat run scripts/deploy.js --network localhost",
     "deploy:base": "hardhat run scripts/deploy.js --network base",
     "node": "hardhat node",
+    "node:fork": "FORKING=true hardhat node",
+    "node:fork:seed": "FORKING=true hardhat node & sleep 5 && FORKING=true hardhat run scripts/fork/setupForkNode.js",
     "clean": "hardhat clean",
+    "fork:usdc": "FORKING=true hardhat run scripts/fork/getUSDC.js",
+    "fork:setup": "FORKING=true hardhat run scripts/fork/setupForkNode.js",
+    "fork:usdc:node": "hardhat run scripts/fork/getUSDC-standalone.js --network localhost",
     "cli:factory": "hardhat run scripts/cli/testFactory.js --network localhost",
     "cli:vault": "hardhat run scripts/cli/testVault.js --network localhost"
   },
