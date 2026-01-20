@@ -9,12 +9,15 @@ import "./VaultDepositWithdraw.sol";
 /**
  * @title VaultRebalance
  * @dev Handles vault rebalancing operations with profit-based fee collection
+ * @notice Rebalancing is restricted to admin (Gnosis Safe multisig wallet)
  */
 abstract contract VaultRebalance is VaultDepositWithdraw {
     using SafeERC20 for IERC20;
 
     /**
      * @dev Rebalance a specific asset to a new vault (must be in available vaults for that asset)
+     * @notice Only callable by admin (Gnosis Safe multisig)
+     * @notice Requires 12-hour cooldown between rebalances for the same asset
      * @param asset The asset to rebalance
      * @param toVault The new vault to deposit into (must be in assetAvailableVaults)
      */
@@ -24,10 +27,13 @@ abstract contract VaultRebalance is VaultDepositWithdraw {
         onlyAllowedAsset(asset)
         onlyAllowedVault(toVault)
         nonReentrant
-        whenNotPaused
     {
         require(assetHasInitialDeposit[asset], "No deposits for this asset");
         require(isVaultAvailableForAsset(asset, toVault), "Vault not available for this asset");
+        require(
+            block.timestamp >= assetLastRebalanceTime[asset] + REBALANCE_COOLDOWN,
+            "Rebalance cooldown not passed (12 hours)"
+        );
 
         address fromVault = assetToVault[asset];
         require(fromVault != toVault, "Same vault");
@@ -72,6 +78,9 @@ abstract contract VaultRebalance is VaultDepositWithdraw {
 
         // Update current vault for this asset
         assetToVault[asset] = toVault;
+
+        // Update last rebalance time for cooldown enforcement
+        assetLastRebalanceTime[asset] = block.timestamp;
 
         emit Rebalanced(asset, fromVault, toVault, amountToDeposit);
     }

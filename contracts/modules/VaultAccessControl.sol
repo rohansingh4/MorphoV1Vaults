@@ -5,7 +5,12 @@ import "./VaultStorage.sol";
 
 /**
  * @title VaultAccessControl
- * @dev Handles access control, modifiers, and ownership management
+ * @dev Handles access control, modifiers, and ownership/admin management
+ * @notice Supports Gnosis Safe multisig wallet for admin role with two-step transfers
+ *
+ * Role hierarchy:
+ * - Owner: EOA user who owns the vault (can withdraw, claim rewards)
+ * - Admin: Gnosis Safe multisig wallet for critical functions (fee changes, vault management, rebalancing)
  */
 abstract contract VaultAccessControl is VaultStorage {
 
@@ -16,6 +21,7 @@ abstract contract VaultAccessControl is VaultStorage {
         _;
     }
 
+    /// @notice Restricts function access to admin (Gnosis Safe multisig)
     modifier onlyAdmin() {
         require(msg.sender == admin, "Only admin");
         _;
@@ -31,16 +37,43 @@ abstract contract VaultAccessControl is VaultStorage {
         _;
     }
 
-    // ============ Admin Management ============
+    // ============ Admin Transfer (Two-Step for Gnosis Safe Compatibility) ============
 
     /**
-     * @dev Update admin address
+     * @dev Initiate admin transfer (two-step process for Gnosis Safe compatibility)
+     * @notice Only callable by current admin (Gnosis Safe multisig)
+     * @notice The new admin must call acceptAdmin() to complete the transfer
+     * @notice This allows Gnosis Safe multisig to safely transfer admin to another Safe
+     * @param newAdmin The address to transfer admin role to (should be another Gnosis Safe)
      */
-    function updateAdmin(address newAdmin) external onlyAdmin {
-        require(newAdmin != address(0), "Invalid admin address");
+    function transferAdmin(address newAdmin) external onlyAdmin {
+        require(newAdmin != address(0), "Invalid new admin");
+        require(newAdmin != admin, "Already the admin");
+        pendingAdmin = newAdmin;
+        emit AdminTransferInitiated(admin, newAdmin);
+    }
+
+    /**
+     * @dev Accept admin transfer (must be called by pending admin)
+     * @notice This is the second step of the two-step admin transfer
+     */
+    function acceptAdmin() external {
+        require(msg.sender == pendingAdmin, "Not pending admin");
         address oldAdmin = admin;
-        admin = newAdmin;
-        emit AdminUpdated(oldAdmin, newAdmin);
+        admin = pendingAdmin;
+        pendingAdmin = address(0);
+        emit AdminTransferCompleted(oldAdmin, admin);
+    }
+
+    /**
+     * @dev Cancel pending admin transfer
+     * @notice Only callable by current admin (Gnosis Safe multisig)
+     */
+    function cancelAdminTransfer() external onlyAdmin {
+        require(pendingAdmin != address(0), "No pending transfer");
+        address cancelled = pendingAdmin;
+        pendingAdmin = address(0);
+        emit AdminTransferCancelled(cancelled);
     }
 
     // ============ Ownership Transfer (Two-Step) ============
@@ -72,22 +105,9 @@ abstract contract VaultAccessControl is VaultStorage {
      */
     function cancelOwnershipTransfer() external onlyOwner {
         require(pendingOwner != address(0), "No pending transfer");
+        address cancelled = pendingOwner;
         pendingOwner = address(0);
+        emit OwnershipTransferCancelled(cancelled);
     }
 
-    // ============ Pause Functionality ============
-
-    /**
-     * @dev Pause the contract
-     */
-    function pause() external onlyAdmin {
-        _pause();
-    }
-
-    /**
-     * @dev Unpause the contract
-     */
-    function unpause() external onlyAdmin {
-        _unpause();
-    }
 }

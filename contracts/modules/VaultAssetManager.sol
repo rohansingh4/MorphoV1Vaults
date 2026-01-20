@@ -7,13 +7,15 @@ import "../Interfaces/IMetaMorpho.sol";
 /**
  * @title VaultAssetManager
  * @dev Manages assets, vaults, and fee configurations
+ * @notice All admin functions are restricted to Gnosis Safe multisig wallet
  */
 abstract contract VaultAssetManager is VaultAccessControl {
 
-    // ============ Asset Management ============
+    // ============ Asset Management (Gnosis Safe Multisig Only) ============
 
     /**
      * @dev Add a new asset with its vault
+     * @notice Only callable by admin (Gnosis Safe multisig)
      */
     function addAsset(address asset, address vault) external onlyAdmin {
         require(asset != address(0), "Invalid asset address");
@@ -34,6 +36,7 @@ abstract contract VaultAssetManager is VaultAccessControl {
 
     /**
      * @dev Remove an asset (only if no deposits exist)
+     * @notice Only callable by admin (Gnosis Safe multisig)
      * @notice Uses O(1) removal via index mapping
      */
     function removeAsset(address asset) external onlyAdmin {
@@ -58,10 +61,11 @@ abstract contract VaultAssetManager is VaultAccessControl {
         emit AssetRemoved(asset);
     }
 
-    // ============ Vault Management ============
+    // ============ Vault Management (Gnosis Safe Multisig Only) ============
 
     /**
      * @dev Remove a vault from the whitelist
+     * @notice Only callable by admin (Gnosis Safe multisig)
      * @notice Uses O(1) removal via index mapping
      */
     function removeVault(address vault) external onlyAdmin {
@@ -90,6 +94,7 @@ abstract contract VaultAssetManager is VaultAccessControl {
 
     /**
      * @dev Add a new vault to an asset's available vaults list
+     * @notice Only callable by admin (Gnosis Safe multisig)
      * @notice Automatically adds vault to global whitelist if not already present
      * @notice Uses O(1) index mapping for efficient lookups
      */
@@ -119,6 +124,8 @@ abstract contract VaultAssetManager is VaultAccessControl {
 
     /**
      * @dev Remove a vault from an asset's available vaults list
+     * @notice Only callable by admin (Gnosis Safe multisig)
+     * @notice Uses O(1) removal via index mapping
      */
     function removeVaultFromAsset(address asset, address vault)
         external
@@ -126,22 +133,29 @@ abstract contract VaultAssetManager is VaultAccessControl {
         onlyAllowedAsset(asset)
     {
         require(vault != assetToVault[asset], "Cannot remove active vault");
-        require(isVaultAvailableForAsset(asset, vault), "Vault not available for asset");
+        require(isAssetVaultAvailable[asset][vault], "Vault not available for asset");
 
+        // O(1) removal using index mapping
         address[] storage vaults = assetAvailableVaults[asset];
-        for (uint256 i = 0; i < vaults.length; i++) {
-            if (vaults[i] == vault) {
-                vaults[i] = vaults[vaults.length - 1];
-                vaults.pop();
-                break;
-            }
+        uint256 idx = assetVaultIndex[asset][vault];
+        uint256 lastIdx = vaults.length - 1;
+
+        if (idx != lastIdx) {
+            address lastVault = vaults[lastIdx];
+            vaults[idx] = lastVault;
+            assetVaultIndex[asset][lastVault] = idx;
         }
+
+        vaults.pop();
+        delete assetVaultIndex[asset][vault];
+        isAssetVaultAvailable[asset][vault] = false;
 
         emit VaultRemoved(vault);
     }
 
     /**
      * @dev Set the active/primary vault for an asset from its available vaults
+     * @notice Only callable by admin (Gnosis Safe multisig)
      */
     function setAssetActiveVault(address asset, address newActiveVault)
         external
@@ -149,7 +163,7 @@ abstract contract VaultAssetManager is VaultAccessControl {
         onlyAllowedAsset(asset)
     {
         require(newActiveVault != address(0), "Invalid vault");
-        require(isVaultAvailableForAsset(asset, newActiveVault), "Vault not available for this asset");
+        require(isAssetVaultAvailable[asset][newActiveVault], "Vault not available for this asset");
         require(assetToVault[asset] != newActiveVault, "Already active vault");
 
         address oldVault = assetToVault[asset];
@@ -158,46 +172,86 @@ abstract contract VaultAssetManager is VaultAccessControl {
         emit AssetVaultUpdated(asset, oldVault, newActiveVault);
     }
 
-    // ============ Fee Configuration ============
+    // ============ Fee Configuration (Gnosis Safe Multisig Only, 24-hour cooldown) ============
 
     /**
-     * @dev Update revenue address
-     */
-    function updateRevenueAddress(address newRevenueAddress) external onlyAdmin {
-        require(newRevenueAddress != address(0), "Invalid revenue address");
-        address oldAddress = revenueAddress;
-        revenueAddress = newRevenueAddress;
-        emit RevenueAddressUpdated(oldAddress, newRevenueAddress);
-    }
-
-    /**
-     * @dev Update fee percentage for withdrawal fees
+     * @dev Update withdrawal fee percentage
+     * @notice Only callable by admin (Gnosis Safe multisig)
+     * @notice Requires 24-hour cooldown between changes
+     * @param newFeePercentage The new fee in basis points (max 10%)
      */
     function updateFeePercentage(uint256 newFeePercentage) external onlyAdmin {
-        require(newFeePercentage <= MAX_FEE_PERCENTAGE, "Fee exceeds maximum");
+        require(newFeePercentage <= MAX_FEE_PERCENTAGE, "Fee exceeds maximum 10%");
+        require(
+            block.timestamp >= lastFeePercentageChangeTime + FEE_CHANGE_TIMELOCK,
+            "Fee change cooldown not passed (24 hours)"
+        );
+
         uint256 oldFee = feePercentage;
         feePercentage = newFeePercentage;
+        lastFeePercentageChangeTime = block.timestamp;
+
         emit FeePercentageUpdated(oldFee, newFeePercentage);
     }
 
     /**
      * @dev Update rebalance fee percentage
+     * @notice Only callable by admin (Gnosis Safe multisig)
+     * @notice Requires 24-hour cooldown between changes
+     * @param newFeePercentage The new fee in basis points (max 10%)
      */
-    function updateRebalanceFeePercentage(uint256 newRebalanceFeePercentage) external onlyAdmin {
-        require(newRebalanceFeePercentage <= MAX_FEE_PERCENTAGE, "Fee exceeds maximum");
+    function updateRebalanceFeePercentage(uint256 newFeePercentage) external onlyAdmin {
+        require(newFeePercentage <= MAX_FEE_PERCENTAGE, "Fee exceeds maximum 10%");
+        require(
+            block.timestamp >= lastRebalanceFeePercentageChangeTime + FEE_CHANGE_TIMELOCK,
+            "Fee change cooldown not passed (24 hours)"
+        );
+
         uint256 oldFee = rebalanceFeePercentage;
-        rebalanceFeePercentage = newRebalanceFeePercentage;
-        emit RebalanceFeePercentageUpdated(oldFee, newRebalanceFeePercentage);
+        rebalanceFeePercentage = newFeePercentage;
+        lastRebalanceFeePercentageChangeTime = block.timestamp;
+
+        emit RebalanceFeePercentageUpdated(oldFee, newFeePercentage);
     }
 
     /**
      * @dev Update Merkl claim fee percentage
+     * @notice Only callable by admin (Gnosis Safe multisig)
+     * @notice Requires 24-hour cooldown between changes
+     * @param newFeePercentage The new fee in basis points (max 10%)
      */
-    function updateMerklClaimFeePercentage(uint256 newMerklClaimFeePercentage) external onlyAdmin {
-        require(newMerklClaimFeePercentage <= MAX_FEE_PERCENTAGE, "Fee exceeds maximum");
+    function updateMerklClaimFeePercentage(uint256 newFeePercentage) external onlyAdmin {
+        require(newFeePercentage <= MAX_FEE_PERCENTAGE, "Fee exceeds maximum 10%");
+        require(
+            block.timestamp >= lastMerklClaimFeePercentageChangeTime + FEE_CHANGE_TIMELOCK,
+            "Fee change cooldown not passed (24 hours)"
+        );
+
         uint256 oldFee = merklClaimFeePercentage;
-        merklClaimFeePercentage = newMerklClaimFeePercentage;
-        emit MerklClaimFeePercentageUpdated(oldFee, newMerklClaimFeePercentage);
+        merklClaimFeePercentage = newFeePercentage;
+        lastMerklClaimFeePercentageChangeTime = block.timestamp;
+
+        emit MerklClaimFeePercentageUpdated(oldFee, newFeePercentage);
+    }
+
+    /**
+     * @dev Update revenue address
+     * @notice Only callable by admin (Gnosis Safe multisig)
+     * @notice Requires 24-hour cooldown between changes
+     * @param newRevenueAddress The new address to receive fees
+     */
+    function updateRevenueAddress(address newRevenueAddress) external onlyAdmin {
+        require(newRevenueAddress != address(0), "Invalid revenue address");
+        require(
+            block.timestamp >= lastRevenueAddressChangeTime + FEE_CHANGE_TIMELOCK,
+            "Revenue address change cooldown not passed (24 hours)"
+        );
+
+        address oldAddress = revenueAddress;
+        revenueAddress = newRevenueAddress;
+        lastRevenueAddressChangeTime = block.timestamp;
+
+        emit RevenueAddressUpdated(oldAddress, newRevenueAddress);
     }
 
     // ============ View Functions ============
@@ -211,14 +265,9 @@ abstract contract VaultAssetManager is VaultAccessControl {
 
     /**
      * @dev Check if a vault is available for a specific asset
+     * @notice O(1) lookup using mapping
      */
     function isVaultAvailableForAsset(address asset, address vault) public view returns (bool) {
-        address[] memory vaults = assetAvailableVaults[asset];
-        for (uint256 i = 0; i < vaults.length; i++) {
-            if (vaults[i] == vault) {
-                return true;
-            }
-        }
-        return false;
+        return isAssetVaultAvailable[asset][vault];
     }
 }

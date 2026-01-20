@@ -4,20 +4,19 @@ pragma solidity ^0.8.28;
 import "./UserVaultV4.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title UserVaultFactory
  * @dev Factory contract for deterministic cross-chain deployment of UserVault_V4 contracts using CREATE2
  * This ensures the same contract address across all supported chains for cross-chain Merkl reward claiming
+ * @notice Admin and revenue addresses are set to default constants in the vault contract
  */
-contract UserVaultFactory is Ownable, Pausable, ReentrancyGuard {
+contract UserVaultFactory is Ownable, ReentrancyGuard {
 
     // Events
     event VaultDeployed(
         address indexed vaultAddress,
         address indexed owner,
-        address indexed admin,
         bytes32 salt,
         uint256 chainId
     );
@@ -31,36 +30,28 @@ contract UserVaultFactory is Ownable, Pausable, ReentrancyGuard {
     // Mapping to track if a vault is deployed by this factory
     mapping(address => bool) public isFactoryVault;
 
-    constructor(address _initialOwner) Ownable(_initialOwner) {
-    }
+    constructor(address _initialOwner) Ownable(_initialOwner) {}
 
     /**
      * @dev Compute the address where a vault would be deployed with given parameters
-     * @param vaultOwner The owner of the vault
-     * @param admin The admin of the vault
-     * = 
+     * @param vaultOwner The owner of the vault (must be EOA)
      * @param assets Array of initial assets (USDC, WETH, etc.)
      * @param assetVaults 2D array of vaults for each asset (each asset can have multiple vaults)
-     * @param revenueAddress Address to receive fees
      * @param salt Unique salt for deterministic deployment
      * @return predictedAddress The predicted address of the vault
      */
     function computeVaultAddress(
         address vaultOwner,
-        address admin,
         address[] memory assets,
         address[][] memory assetVaults,
-        address revenueAddress,
         bytes32 salt
     ) public view returns (address predictedAddress) {
         bytes memory bytecode = abi.encodePacked(
             type(UserVault_V4).creationCode,
             abi.encode(
                 vaultOwner,
-                admin,
                 assets,
-                assetVaults,
-                revenueAddress
+                assetVaults
             )
         );
 
@@ -92,30 +83,26 @@ contract UserVaultFactory is Ownable, Pausable, ReentrancyGuard {
 
     /**
      * @dev Deploy a new UserVault_V4 contract with deterministic address
-     * @param vaultOwner The owner of the vault
-     * @param admin The admin of the vault
+     * @notice Admin and revenue addresses use default constants from the vault contract
+     * @param vaultOwner The owner of the vault (must be EOA)
      * @param assets Array of initial assets (USDC, WETH, WBTC, etc.)
      * @param assetVaults 2D array of vaults for each asset. Each asset can have multiple vaults.
      *        Example: [[USDC_Vault1, USDC_Vault2, USDC_Vault3], [WETH_Vault1, WETH_Vault2]]
-     * @param revenueAddress Address to receive fees
      * @param salt Unique salt for deterministic deployment
      * @return vaultAddress The deployed vault address
      */
     function deployVault(
         address vaultOwner,
-        address admin,
         address[] memory assets,
         address[][] memory assetVaults,
-        address revenueAddress,
         bytes32 salt
-    ) external nonReentrant whenNotPaused returns (address vaultAddress) {
+    ) external nonReentrant returns (address vaultAddress) {
 
         require(deployedVaults[vaultOwner][salt] == address(0), "Vault already exists for this owner and salt");
         require(vaultOwner != address(0), "Invalid owner address");
-        require(admin != address(0), "Invalid admin address");
+        require(vaultOwner.code.length == 0, "Owner must be EOA");
         require(assets.length > 0, "No assets provided");
         require(assets.length == assetVaults.length, "Assets and vaults array length mismatch");
-        require(revenueAddress != address(0), "Invalid revenue address");
 
         for (uint256 i = 0; i < assets.length; i++) {
             require(assets[i] != address(0), "Invalid asset address");
@@ -130,10 +117,8 @@ contract UserVaultFactory is Ownable, Pausable, ReentrancyGuard {
             type(UserVault_V4).creationCode,
             abi.encode(
                 vaultOwner,
-                admin,
                 assets,
-                assetVaults,
-                revenueAddress
+                assetVaults
             )
         );
 
@@ -148,38 +133,32 @@ contract UserVaultFactory is Ownable, Pausable, ReentrancyGuard {
         ownerVaults[vaultOwner].push(vaultAddress);
         isFactoryVault[vaultAddress] = true;
 
-        emit VaultDeployed(vaultAddress, vaultOwner, admin, salt, block.chainid);
+        emit VaultDeployed(vaultAddress, vaultOwner, salt, block.chainid);
 
         return vaultAddress;
     }
 
     /**
      * @dev Deploy vault with auto-generated salt (convenience function)
-     * @param vaultOwner The owner of the vault
-     * @param admin The admin of the vault
+     * @param vaultOwner The owner of the vault (must be EOA)
      * @param assets Array of initial assets
      * @param assetVaults 2D array of vaults for each asset
-     * @param revenueAddress Address to receive fees
      * @param nonce Unique nonce for the owner
      * @return vaultAddress The deployed vault address
      * @return salt The generated salt used for deployment
      */
     function deployVaultWithNonce(
         address vaultOwner,
-        address admin,
         address[] memory assets,
         address[][] memory assetVaults,
-        address revenueAddress,
         uint256 nonce
     ) external returns (address vaultAddress, bytes32 salt) {
         salt = generateDeterministicSalt(vaultOwner, nonce);
 
         vaultAddress = this.deployVault(
             vaultOwner,
-            admin,
             assets,
             assetVaults,
-            revenueAddress,
             salt
         );
 
@@ -214,21 +193,5 @@ contract UserVaultFactory is Ownable, Pausable, ReentrancyGuard {
      */
     function getVaultByOwnerAndSalt(address vaultOwner, bytes32 salt) external view returns (address) {
         return deployedVaults[vaultOwner][salt];
-    }
-
-    // ============ Admin Functions ============
-
-    /**
-     * @dev Pause contract (only owner)
-     */
-    function pause() external onlyOwner {
-        _pause();
-    }
-
-    /**
-     * @dev Unpause contract (only owner)
-     */
-    function unpause() external onlyOwner {
-        _unpause();
     }
 }

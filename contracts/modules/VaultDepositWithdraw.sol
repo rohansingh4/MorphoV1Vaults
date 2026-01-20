@@ -26,7 +26,6 @@ abstract contract VaultDepositWithdraw is VaultCore {
         onlyOwner
         onlyAllowedAsset(asset)
         nonReentrant
-        whenNotPaused
     {
         require(!assetHasInitialDeposit[asset], "Initial deposit already made for this asset");
         require(amount > 0, "Amount must be positive");
@@ -64,7 +63,6 @@ abstract contract VaultDepositWithdraw is VaultCore {
         onlyOwner
         onlyAllowedAsset(asset)
         nonReentrant
-        whenNotPaused
     {
         require(assetHasInitialDeposit[asset], "Initial deposit not made for this asset");
         require(amount > 0, "Amount must be positive");
@@ -88,6 +86,7 @@ abstract contract VaultDepositWithdraw is VaultCore {
 
     /**
      * @dev Admin deposit function - allows admin to deposit on behalf of user
+     * @notice Admin deposits affect the profit base amount
      * @param asset The asset to deposit
      * @param amount Amount to deposit
      */
@@ -96,7 +95,6 @@ abstract contract VaultDepositWithdraw is VaultCore {
         onlyAdmin
         onlyAllowedAsset(asset)
         nonReentrant
-        whenNotPaused
     {
         require(assetHasInitialDeposit[asset], "Initial deposit not made for this asset");
         require(amount > 0, "Amount must be positive");
@@ -130,7 +128,6 @@ abstract contract VaultDepositWithdraw is VaultCore {
         onlyOwner
         onlyAllowedAsset(asset)
         nonReentrant
-        whenNotPaused
     {
         require(assetHasInitialDeposit[asset], "No deposits for this asset");
 
@@ -168,43 +165,5 @@ abstract contract VaultDepositWithdraw is VaultCore {
             : 0;
 
         emit Withdrawal(asset, vault, owner, userAmount);
-    }
-
-    /**
-     * @dev Emergency withdraw for a specific asset when paused
-     */
-    function emergencyWithdraw(address asset)
-        external
-        onlyOwner
-        onlyAllowedAsset(asset)
-        whenPaused
-        nonReentrant
-    {
-        address vault = assetToVault[asset];
-        require(vault != address(0), "No vault for asset");
-
-        uint256 balance = _getVaultBalance(vault);
-        if (balance > 0) {
-            uint256 redeemedAmount = _redeemFromVaultViaBundler(vault, balance);
-
-            // Calculate fee and user amount
-            (uint256 feeAmount, uint256 userAmount) = calculateFeeFromProfit(
-                asset,
-                redeemedAmount
-            );
-
-            // Transfer fee to revenue address if there's a fee
-            if (feeAmount > 0) {
-                IERC20(asset).safeTransfer(revenueAddress, feeAmount);
-                assetTotalFeesCollected[asset] += feeAmount;
-                emit FeeCollected(asset, vault, feeAmount, userAmount);
-            }
-
-            // Transfer remaining amount to owner
-            IERC20(asset).safeTransfer(owner, userAmount);
-            assetTotalDeposited[asset] = 0;
-
-            emit Withdrawal(asset, vault, owner, userAmount);
-        }
     }
 }

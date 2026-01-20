@@ -4,7 +4,6 @@ pragma solidity ^0.8.28;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
 
 import "../Interfaces/IBundler.sol";
 import "../Interfaces/IMerklDistributor.sol";
@@ -12,8 +11,9 @@ import "../Interfaces/IMerklDistributor.sol";
 /**
  * @title VaultStorage
  * @dev Base contract containing all state variables for the vault system
+ * @notice Admin role is designed for Gnosis Safe multisig wallet
  */
-abstract contract VaultStorage is ReentrancyGuard, Pausable {
+abstract contract VaultStorage is ReentrancyGuard {
     using SafeERC20 for IERC20;
     // ============ Constants ============
 
@@ -24,22 +24,38 @@ abstract contract VaultStorage is ReentrancyGuard, Pausable {
     // Merkl Distributor address
     address public constant MERKL_DISTRIBUTOR = 0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae;
 
+    // Default admin address (Gnosis Safe multisig wallet) - UPDATE THIS BEFORE DEPLOYMENT
+    address public constant DEFAULT_ADMIN = 0x1234567890123456789012345678901234567890;
+
+    // Default revenue address - UPDATE THIS BEFORE DEPLOYMENT
+    address public constant DEFAULT_REVENUE_ADDRESS = 0x0987654321098765432109876543210987654321;
+
     IBundler3 public constant bundler = IBundler3(BUNDLER_ADDRESS);
     IMerklDistributor public constant merklDistributor = IMerklDistributor(MERKL_DISTRIBUTOR);
 
     // Fee configuration
-    uint256 public constant MAX_FEE_PERCENTAGE = 2000; // Maximum 20% fee in basis points
+    uint256 public constant MAX_FEE_PERCENTAGE = 1000; // Maximum 10% fee in basis points
     uint256 public constant DEFAULT_FEE_PERCENTAGE = 1000; // Default 10% fee in basis points
 
     // Slippage protection for vault operations (in basis points, e.g., 100 = 1%)
     uint256 public constant SHARE_PRICE_SLIPPAGE_TOLERANCE = 100; // 1% slippage tolerance
 
+    // Timelock duration for fee and revenue address changes (24 hours)
+    uint256 public constant FEE_CHANGE_TIMELOCK = 24 hours;
+
+    // Rebalance cooldown period (12 hours)
+    uint256 public constant REBALANCE_COOLDOWN = 12 hours;
+
+    // Maximum batch size for Merkl claims (bounds O(n²) duplicate check)
+    uint256 public constant MAX_MERKL_BATCH_SIZE = 20;
+
     // ============ State Variables ============
 
     // Access control
-    address public owner;
-    address public admin;
+    address public owner;       // EOA user who owns the vault
+    address public admin;       // Gnosis Safe multisig wallet for critical admin functions
     address public pendingOwner;
+    address public pendingAdmin; // For two-step admin transfer (Gnosis Safe compatibility)
 
     // Multi-asset support: each asset has its own vault and tracking
     mapping(address => address) public assetToVault; // asset => current active vault for that asset
@@ -70,6 +86,14 @@ abstract contract VaultStorage is ReentrancyGuard, Pausable {
     uint256 public feePercentage = DEFAULT_FEE_PERCENTAGE; // Fee percentage in basis points (default 10%)
     uint256 public rebalanceFeePercentage = DEFAULT_FEE_PERCENTAGE; // Rebalance fee percentage in basis points (default 10%)
     uint256 public merklClaimFeePercentage = DEFAULT_FEE_PERCENTAGE; // Merkl claim fee percentage in basis points (default 10%)
+
+    // Last change timestamps for cooldown enforcement
+    uint256 public lastFeePercentageChangeTime;
+    uint256 public lastRebalanceFeePercentageChangeTime;
+    uint256 public lastMerklClaimFeePercentageChangeTime;
+
+    // Rebalance cooldown tracking
+    mapping(address => uint256) public assetLastRebalanceTime; // asset => last rebalance timestamp
 
     // Merkl operator approval status
     bool public adminApprovedForMerkl;
@@ -124,4 +148,16 @@ abstract contract VaultStorage is ReentrancyGuard, Pausable {
     // Ownership events
     event OwnershipTransferInitiated(address indexed currentOwner, address indexed pendingOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    // Admin transfer events (two-step for Safe compatibility)
+    event AdminTransferInitiated(address indexed currentAdmin, address indexed pendingAdmin);
+    event AdminTransferCompleted(address indexed previousAdmin, address indexed newAdmin);
+    event AdminTransferCancelled(address indexed pendingAdmin);
+
+    // Ownership transfer cancellation event
+    event OwnershipTransferCancelled(address indexed pendingOwner);
+
+    // Revenue address cooldown tracking
+    uint256 public lastRevenueAddressChangeTime;
+
 }
