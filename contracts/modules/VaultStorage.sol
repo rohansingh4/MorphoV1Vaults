@@ -24,11 +24,11 @@ abstract contract VaultStorage is ReentrancyGuard {
     // Merkl Distributor address
     address public constant MERKL_DISTRIBUTOR = 0x3Ef3D8bA38EBe18DB133cEc108f4D14CE00Dd9Ae;
 
-    // Default admin address (Gnosis Safe multisig wallet) - UPDATE THIS BEFORE DEPLOYMENT
-    address public constant DEFAULT_ADMIN = 0x1234567890123456789012345678901234567890;
+    // Default admin address (Gnosis Safe multisig wallet)
+    address public constant DEFAULT_ADMIN = 0x4C1C23901d99167a76D24cE3de87049fc8435668;
 
-    // Default revenue address - UPDATE THIS BEFORE DEPLOYMENT
-    address public constant DEFAULT_REVENUE_ADDRESS = 0x0987654321098765432109876543210987654321;
+    // Default revenue address (Gnosis Safe multisig wallet)
+    address public constant DEFAULT_REVENUE_ADDRESS = 0x4C1C23901d99167a76D24cE3de87049fc8435668;
 
     IBundler3 public constant bundler = IBundler3(BUNDLER_ADDRESS);
     IMerklDistributor public constant merklDistributor = IMerklDistributor(MERKL_DISTRIBUTOR);
