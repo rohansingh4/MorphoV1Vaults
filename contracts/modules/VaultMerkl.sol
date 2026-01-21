@@ -15,13 +15,6 @@ abstract contract VaultMerkl is VaultRebalance {
     using SafeERC20 for IERC20;
 
     /**
-     * @dev Check if admin is approved as Merkl operator
-     */
-    function isAdminApprovedForMerkl() external view returns (bool) {
-        return merklDistributor.operators(address(this), admin) == 1;
-    }
-
-    /**
      * @dev Claim single Merkl reward token
      * @notice Only owner can claim rewards
      * @dev Deducts merklClaimFeePercentage from claimed amount, sends fee to revenueAddress and rest to owner
@@ -142,21 +135,4 @@ abstract contract VaultMerkl is VaultRebalance {
         }
     }
 
-    /**
-     * @dev Re-approve admin as Merkl operator (useful if admin changed or operator status was revoked)
-     * @notice Only callable by owner to ensure security
-     */
-    function reapproveMerklOperator() external onlyOwner {
-        // Check current operator status
-        bool currentlyApproved = merklDistributor.operators(address(this), admin) == 1;
-
-        // Toggle operator status (if currently approved, this will revoke and re-approve)
-        if (currentlyApproved) {
-            merklDistributor.toggleOperator(address(this), admin); // Revoke
-        }
-        merklDistributor.toggleOperator(address(this), admin); // Approve
-
-        adminApprovedForMerkl = true;
-        emit MerklOperatorReapproved(admin);
-    }
 }

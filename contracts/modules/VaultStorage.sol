@@ -35,7 +35,9 @@ abstract contract VaultStorage is ReentrancyGuard {
 
     // Fee configuration
     uint256 public constant MAX_FEE_PERCENTAGE = 1000; // Maximum 10% fee in basis points
-    uint256 public constant DEFAULT_FEE_PERCENTAGE = 1000; // Default 10% fee in basis points
+    uint256 public constant DEFAULT_WITHDRAWAL_FEE = 0; // Default 0% withdrawal fee (no fee on withdrawals)
+    uint256 public constant DEFAULT_REBALANCE_FEE = 1000; // Default 10% rebalance fee in basis points
+    uint256 public constant DEFAULT_MERKL_CLAIM_FEE = 1000; // Default 10% Merkl claim fee in basis points
 
     // Slippage protection for vault operations (in basis points, e.g., 100 = 1%)
     uint256 public constant SHARE_PRICE_SLIPPAGE_TOLERANCE = 100; // 1% slippage tolerance
@@ -83,9 +85,9 @@ abstract contract VaultStorage is ReentrancyGuard {
 
     // Fee settings
     address public revenueAddress;
-    uint256 public feePercentage = DEFAULT_FEE_PERCENTAGE; // Fee percentage in basis points (default 10%)
-    uint256 public rebalanceFeePercentage = DEFAULT_FEE_PERCENTAGE; // Rebalance fee percentage in basis points (default 10%)
-    uint256 public merklClaimFeePercentage = DEFAULT_FEE_PERCENTAGE; // Merkl claim fee percentage in basis points (default 10%)
+    uint256 public feePercentage = DEFAULT_WITHDRAWAL_FEE; // Withdrawal fee in basis points (default 0%)
+    uint256 public rebalanceFeePercentage = DEFAULT_REBALANCE_FEE; // Rebalance fee in basis points (default 10%)
+    uint256 public merklClaimFeePercentage = DEFAULT_MERKL_CLAIM_FEE; // Merkl claim fee in basis points (default 10%)
 
     // Last change timestamps for cooldown enforcement
     uint256 public lastFeePercentageChangeTime;
@@ -94,9 +96,6 @@ abstract contract VaultStorage is ReentrancyGuard {
 
     // Rebalance cooldown tracking
     mapping(address => uint256) public assetLastRebalanceTime; // asset => last rebalance timestamp
-
-    // Merkl operator approval status
-    bool public adminApprovedForMerkl;
 
     // ============ Events ============
 
@@ -141,9 +140,7 @@ abstract contract VaultStorage is ReentrancyGuard {
     );
 
     // Merkl events
-    event MerklOperatorApproved(address indexed admin);
     event MerklTokensClaimed(address indexed token, uint256 totalAmount, uint256 feeAmount, uint256 userAmount);
-    event MerklOperatorReapproved(address indexed admin);
 
     // Ownership events
     event OwnershipTransferInitiated(address indexed currentOwner, address indexed pendingOwner);

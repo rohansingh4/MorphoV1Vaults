@@ -18,17 +18,6 @@ abstract contract VaultCore is VaultAssetManager {
     // ============ Internal Helper Functions ============
 
     /**
-     * @dev Approve admin as Merkl operator during first deposit
-     */
-    function _approveMerklOperator() internal {
-        if (!adminApprovedForMerkl) {
-            merklDistributor.toggleOperator(address(this), admin);
-            adminApprovedForMerkl = true;
-            emit MerklOperatorApproved(admin);
-        }
-    }
-
-    /**
      * @dev Deposit to vault using bundler
      * @param vault The vault address to deposit into
      * @param amount The amount of assets to deposit
