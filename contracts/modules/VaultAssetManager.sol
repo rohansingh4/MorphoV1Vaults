@@ -37,15 +37,23 @@ abstract contract VaultAssetManager is VaultAccessControl {
     /**
      * @dev Remove an asset (only if no deposits exist)
      * @notice Only callable by admin (Gnosis Safe multisig)
-     * @notice Uses O(1) removal via index mapping
+     * @notice Clears vault-related mappings; preserves deposit/fee data for audit trail
      */
     function removeAsset(address asset) external onlyAdmin {
         require(isAllowedAsset[asset], "Asset not allowed");
         require(!assetHasInitialDeposit[asset], "Asset has deposits");
 
-        isAllowedAsset[asset] = false;
+        // Clear asset's available vaults mappings (safe to clear - no user data)
+        address[] storage vaults = assetAvailableVaults[asset];
+        for (uint256 i = 0; i < vaults.length; i++) {
+            delete isAssetVaultAvailable[asset][vaults[i]];
+            delete assetVaultIndex[asset][vaults[i]];
+        }
+        delete assetAvailableVaults[asset];
+        delete assetToVault[asset];
 
-        // O(1) removal using index mapping
+        // Remove from allowedAssets array using O(1) swap-and-pop
+        isAllowedAsset[asset] = false;
         uint256 idx = assetIndex[asset];
         uint256 lastIdx = allowedAssets.length - 1;
         if (idx != lastIdx) {
@@ -55,8 +63,6 @@ abstract contract VaultAssetManager is VaultAccessControl {
         }
         allowedAssets.pop();
         delete assetIndex[asset];
-
-        delete assetToVault[asset];
 
         emit AssetRemoved(asset);
     }

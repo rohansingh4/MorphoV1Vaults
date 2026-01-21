@@ -84,6 +84,12 @@ abstract contract VaultViews is VaultMerkl {
 
     /**
      * @dev Get summary of all assets with deposits
+     * @notice Optimized single-pass iteration; returns activeCount for array bounds
+     * @return assets Array of asset addresses (use activeCount for valid entries)
+     * @return deposited Array of deposited amounts
+     * @return currentValues Array of current vault values
+     * @return profits Array of profit/loss values
+     * @return activeCount Number of valid entries in the arrays
      */
     function getPortfolioSummary()
         external
@@ -92,34 +98,29 @@ abstract contract VaultViews is VaultMerkl {
             address[] memory assets,
             uint256[] memory deposited,
             uint256[] memory currentValues,
-            int256[] memory profits
+            int256[] memory profits,
+            uint256 activeCount
         )
     {
-        uint256 activeCount = 0;
-        for (uint256 i = 0; i < allowedAssets.length; i++) {
-            if (assetHasInitialDeposit[allowedAssets[i]]) {
+        uint256 totalAssets = allowedAssets.length;
+        assets = new address[](totalAssets);
+        deposited = new uint256[](totalAssets);
+        currentValues = new uint256[](totalAssets);
+        profits = new int256[](totalAssets);
+
+        // Single-pass iteration
+        for (uint256 i = 0; i < totalAssets; i++) {
+            address asset = allowedAssets[i];
+            if (assetHasInitialDeposit[asset]) {
+                assets[activeCount] = asset;
+                deposited[activeCount] = assetTotalDeposited[asset];
+                currentValues[activeCount] = this.getAssetVaultAssets(asset);
+                profits[activeCount] = this.getAssetProfit(asset);
                 activeCount++;
             }
         }
 
-        assets = new address[](activeCount);
-        deposited = new uint256[](activeCount);
-        currentValues = new uint256[](activeCount);
-        profits = new int256[](activeCount);
-
-        uint256 index = 0;
-        for (uint256 i = 0; i < allowedAssets.length; i++) {
-            address asset = allowedAssets[i];
-            if (assetHasInitialDeposit[asset]) {
-                assets[index] = asset;
-                deposited[index] = assetTotalDeposited[asset];
-                currentValues[index] = this.getAssetVaultAssets(asset);
-                profits[index] = this.getAssetProfit(asset);
-                index++;
-            }
-        }
-
-        return (assets, deposited, currentValues, profits);
+        return (assets, deposited, currentValues, profits, activeCount);
     }
 
     /**
