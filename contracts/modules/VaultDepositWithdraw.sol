@@ -17,6 +17,7 @@ abstract contract VaultDepositWithdraw is VaultCore {
 
     /**
      * @dev Initial deposit for a specific asset
+     * @notice Follows CEI (Checks-Effects-Interactions) pattern for reentrancy safety
      * @param asset The asset to deposit
      * @param vault The vault to deposit into (must be in assetAvailableVaults for this asset)
      * @param amount Amount to deposit
@@ -27,28 +28,22 @@ abstract contract VaultDepositWithdraw is VaultCore {
         onlyAllowedAsset(asset)
         nonReentrant
     {
+        // CHECKS
         require(!assetHasInitialDeposit[asset], "Initial deposit already made for this asset");
         require(amount > 0, "Amount must be positive");
         require(vault != address(0), "Invalid vault address");
         require(isVaultAvailableForAsset(asset, vault), "Vault not available for this asset");
 
-        // Approve admin as Merkl operator on first deposit (any asset)
-        _approveMerklOperator();
-
-        // Transfer asset from user to this contract
-        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
-
-        // Deposit to vault using bundler
-        _depositToVaultViaBundler(vault, amount, asset);
-
-        // Set the chosen vault as the active vault for this asset
+        // EFFECTS - Update state before external calls
         assetToVault[asset] = vault;
-
-        // Set state for this asset
         assetTotalDeposited[asset] = amount;
         assetHasInitialDeposit[asset] = true;
         assetLastDepositTime[asset] = block.timestamp;
-        assetRebalanceBaseAmount[asset] = amount; // Set initial base amount for rebalance profit calculation
+        assetRebalanceBaseAmount[asset] = amount;
+
+        // INTERACTIONS - External calls after state updates
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        _depositToVaultViaBundler(vault, amount, asset);
 
         emit InitialDeposit(asset, vault, amount);
     }
@@ -120,6 +115,7 @@ abstract contract VaultDepositWithdraw is VaultCore {
 
     /**
      * @dev Withdraw from a specific asset's vault
+     * @notice Correctly tracks principal vs profit to prevent accounting issues
      * @param asset The asset to withdraw
      * @param amount Amount of shares to withdraw (0 for full withdrawal)
      */
@@ -138,6 +134,17 @@ abstract contract VaultDepositWithdraw is VaultCore {
         uint256 withdrawAmount = amount;
         if (amount == 0 || amount > vaultBalance) {
             withdrawAmount = vaultBalance; // Full withdrawal
+        }
+
+        // Calculate principal portion being withdrawn (proportional to shares)
+        // This must be done BEFORE the redeem to get accurate share proportion
+        uint256 principalPortion;
+        if (withdrawAmount >= vaultBalance) {
+            // Full withdrawal - all remaining principal
+            principalPortion = assetTotalDeposited[asset];
+        } else {
+            // Partial withdrawal - proportional principal
+            principalPortion = (assetTotalDeposited[asset] * withdrawAmount) / vaultBalance;
         }
 
         // Redeem from vault using bundler
@@ -159,10 +166,12 @@ abstract contract VaultDepositWithdraw is VaultCore {
         // Transfer remaining amount to owner
         IERC20(asset).safeTransfer(owner, userAmount);
 
-        // Update total deposited
-        assetTotalDeposited[asset] = assetTotalDeposited[asset] > redeemedAmount
-            ? assetTotalDeposited[asset] - redeemedAmount
-            : 0;
+        // Update total deposited (reduce by principal portion only, not profit)
+        if (principalPortion >= assetTotalDeposited[asset]) {
+            assetTotalDeposited[asset] = 0;
+        } else {
+            assetTotalDeposited[asset] -= principalPortion;
+        }
 
         emit Withdrawal(asset, vault, owner, userAmount);
     }

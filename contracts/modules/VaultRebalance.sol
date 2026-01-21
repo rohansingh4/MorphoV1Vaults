@@ -18,6 +18,7 @@ abstract contract VaultRebalance is VaultDepositWithdraw {
      * @dev Rebalance a specific asset to a new vault (must be in available vaults for that asset)
      * @notice Only callable by admin (Gnosis Safe multisig)
      * @notice Requires 12-hour cooldown between rebalances for the same asset
+     * @notice Uses nonReentrant + partial CEI pattern for reentrancy safety
      * @param asset The asset to rebalance
      * @param toVault The new vault to deposit into (must be in assetAvailableVaults)
      */
@@ -28,6 +29,7 @@ abstract contract VaultRebalance is VaultDepositWithdraw {
         onlyAllowedVault(toVault)
         nonReentrant
     {
+        // CHECKS
         require(assetHasInitialDeposit[asset], "No deposits for this asset");
         require(isVaultAvailableForAsset(asset, toVault), "Vault not available for this asset");
         require(
@@ -42,11 +44,16 @@ abstract contract VaultRebalance is VaultDepositWithdraw {
         uint256 balance = _getVaultBalance(fromVault);
         require(balance > 0, "No funds to rebalance");
 
-        // Redeem from current vault
+        // Cache base amount before any external calls
+        uint256 baseAmount = assetRebalanceBaseAmount[asset];
+
+        // EFFECTS (partial) - Update cooldown before external calls to prevent reentrancy bypass
+        assetLastRebalanceTime[asset] = block.timestamp;
+
+        // INTERACTIONS - Redeem from current vault
         uint256 redeemedAmount = _redeemFromVaultViaBundler(fromVault, balance);
 
         // Calculate profit and deduct rebalance fee if there's profit
-        uint256 baseAmount = assetRebalanceBaseAmount[asset];
         uint256 amountToDeposit = redeemedAmount;
         uint256 feeAmount = 0;
 
@@ -76,11 +83,8 @@ abstract contract VaultRebalance is VaultDepositWithdraw {
         // Deposit into new vault (amount after fee deduction if applicable)
         _depositToVaultViaBundler(toVault, amountToDeposit, asset);
 
-        // Update current vault for this asset
+        // EFFECTS (final) - Update vault mapping after successful deposit
         assetToVault[asset] = toVault;
-
-        // Update last rebalance time for cooldown enforcement
-        assetLastRebalanceTime[asset] = block.timestamp;
 
         emit Rebalanced(asset, fromVault, toVault, amountToDeposit);
     }
